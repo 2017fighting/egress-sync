@@ -74,6 +74,7 @@ def evaluate(
     payloads: Sequence[Payload],
     previous: Mapping[str, int],
     min_ratio: float,
+    skipped: Mapping[str, str] | None = None,
 ) -> GateResult:
     """Judge every kind; one rejection blocks the round.
 
@@ -81,13 +82,22 @@ def evaluate(
     A kind with no previous version is only subject to the empty/invalid rules —
     there is no baseline to shrink from, which is also why `--once` cannot
     enforce the ratio check on a first run.
+
+    `skipped` maps a kind to the reason its source deliberately produced nothing
+    this round (`home-ops#196`: the hath state file is missing, unreadable or
+    empty). A skipped kind is NOT an `upstream` rejection — the source answered,
+    it just had nothing to say — and it is not published either: the worker keeps
+    the previous revision, which is why its shrink baseline is left untouched.
+    Every other kind that is neither derived nor skipped stays a rejection.
     """
+    skipped = dict(skipped or {})
     rejections: list[Rejection] = []
     seen = {p.kind for p in payloads}
 
     for kind in KINDS:
-        if kind not in seen:
-            rejections.append(Rejection(kind, REASON_UPSTREAM, "not derived this round"))
+        if kind in seen or kind in skipped:
+            continue
+        rejections.append(Rejection(kind, REASON_UPSTREAM, "not derived this round"))
     for payload in payloads:
         if not payload.entries:
             rejections.append(Rejection(payload.kind, REASON_EMPTY, "0 entries"))

@@ -11,6 +11,7 @@ import json
 
 import pytest
 from egress_sync import CLIENT_NAME, KINDS
+from egress_sync.derive import SKIP_EMPTY, SKIP_MISSING, SKIP_UNREADABLE
 from egress_sync.sources import (
     ClusterNodeSource,
     ProviderRefresher,
@@ -133,23 +134,50 @@ def test_node_source_reports_an_api_error() -> None:
         source.fetch()
 
 
-def test_rpc_state_source_reads_the_file() -> None:
-    source = RpcStateSource("/state/rpc.txt", read_text=lambda path: "::ffff:1.2.3.4\n5.6.7.8\n")
+RPC_STATE_READS = [
+    # (case, file content, expected skip_reason, expected addresses)
+    ("valid content", "::ffff:1.2.3.4\n5.6.7.8\n", "", ("1.2.3.4", "5.6.7.8")),
+    ("empty file", "", SKIP_EMPTY, ()),
+    ("only comments", "# pushed 2026-11-06\n# 5 addresses\n", SKIP_EMPTY, ()),
+    ("only unparseable lines", "not-an-ip\n999.1.1.1\n", SKIP_EMPTY, ()),
+    ("valid plus garbage stays usable", "1.2.3.4\nnot-an-ip\n", "", ("1.2.3.4",)),
+]
 
-    result = source.fetch()
 
-    assert result.ips == ("1.2.3.4", "5.6.7.8")
+@pytest.mark.parametrize("case,text,expected_skip,expected_ips", RPC_STATE_READS)
+def test_rpc_state_source_classifies_one_read(
+    case: str, text: str, expected_skip: str, expected_ips: tuple[str, ...]
+) -> None:
+    result = RpcStateSource("/state/rpc.txt", read_text=lambda path: text).fetch()
+
+    assert result.skip_reason == expected_skip, case
+    assert result.addrs.ips == expected_ips, case
+    assert result.usable is (expected_skip == ""), case
 
 
-@pytest.mark.parametrize(
-    "error",
-    [FileNotFoundError("no such file"), PermissionError("denied")],
-)
-def test_rpc_state_source_fails_loudly(error: OSError) -> None:
-    source = RpcStateSource("/state/rpc.txt", read_text=lambda path: (_ for _ in ()).throw(error))
+def test_rpc_state_source_reports_a_missing_file_as_a_skip() -> None:
+    # home-ops#196: no exception — the round decides what to do with it.
+    source = RpcStateSource("/state/rpc.txt", read_text=lambda path: (_ for _ in ()).throw(FileNotFoundError("gone")))
 
-    with pytest.raises(SourceError):
-        source.fetch()
+    state = source.fetch()
+
+    assert state.skip_reason == SKIP_MISSING
+    assert state.addrs.ips == ()
+    assert "does not exist" in state.detail
+
+
+def test_rpc_state_source_keeps_unreadable_distinct_from_missing() -> None:
+    source = RpcStateSource(
+        "/state/rpc.txt",
+        read_text=lambda path: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    state = source.fetch()
+
+    # A broken mount/permission needs a human; a not-yet-written file is #195 in
+    # flight. Same round behaviour, different series.
+    assert state.skip_reason == SKIP_UNREADABLE
+    assert "unreadable" in state.detail
 
 
 def test_refresher_uses_configured_provider_names() -> None:

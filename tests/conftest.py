@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 from egress_sync.config import Config
-from egress_sync.derive import NodeIPs, RpcAddrs, TrackerHosts
+from egress_sync.derive import NodeIPs, RpcAddrs, RpcState, TrackerHosts
 from egress_sync.gate import Payload
 from egress_sync.metrics import Metrics
 from egress_sync.transport import Response
@@ -128,11 +128,13 @@ class StubTrackerSource:
 
 
 class StubRpcSource:
-    def __init__(self, result: RpcAddrs | Exception) -> None:
-        self.result = result
+    """A `RpcState`, or a bare `RpcAddrs` meaning "usable addresses"."""
+
+    def __init__(self, result: RpcState | RpcAddrs | Exception) -> None:
+        self.result = RpcState(result) if isinstance(result, RpcAddrs) else result
         self.calls = 0
 
-    def fetch(self) -> RpcAddrs:
+    def fetch(self) -> RpcState:
         self.calls += 1
         if isinstance(self.result, Exception):
             raise self.result

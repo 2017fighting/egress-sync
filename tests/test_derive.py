@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import pytest
 from egress_sync.derive import (
+    SKIP_EMPTY,
+    SKIP_MISSING,
+    classify_rpc_state,
     derive_node_ips,
     derive_tracker_hosts,
     host_from_announce_url,
@@ -145,6 +148,63 @@ def test_parse_rpc_state(text: str, expected_ips: tuple[str, ...], expected_inva
 
     assert result.ips == expected_ips
     assert result.invalid == expected_invalid
+
+
+CLASSIFY_CASES = [
+    # (case, state-file read (None = the file does not exist), skip_reason, ips, invalid)
+    ("missing file", None, SKIP_MISSING, (), ()),
+    ("empty file", "", SKIP_EMPTY, (), ()),
+    ("whitespace only", "\n \n\t\n", SKIP_EMPTY, (), ()),
+    ("only comments", "# pushed 2026-11-06\n# 5 addresses\n", SKIP_EMPTY, (), ()),
+    # Unparseable lines are "empty" (no usable address) and still reported, so the
+    # log/metric can name them instead of the round failing outright.
+    ("only unparseable lines", "not-an-ip\n999.1.1.1\n", SKIP_EMPTY, (), ("999.1.1.1", "not-an-ip")),
+    # The real payload shape: one normalised address per line, LF terminated.
+    (
+        "valid content",
+        "37.48.81.219\n37.48.81.200\n212.7.200.99\n212.7.202.50\n5.79.104.109\n",
+        "",
+        ("5.79.104.109", "37.48.81.200", "37.48.81.219", "212.7.200.99", "212.7.202.50"),
+        (),
+    ),
+    # One bad line does not hide the good ones: the kind stays usable and the gate
+    # turns the garbage into a refusal ("not silently dropped").
+    ("valid plus garbage", "1.2.3.4\nnot-an-ip\n", "", ("1.2.3.4",), ("not-an-ip",)),
+]
+
+
+@pytest.mark.parametrize("case,text,expected_skip,expected_ips,expected_invalid", CLASSIFY_CASES)
+def test_classify_rpc_state(
+    case: str,
+    text: str | None,
+    expected_skip: str,
+    expected_ips: tuple[str, ...],
+    expected_invalid: tuple[str, ...],
+) -> None:
+    state = classify_rpc_state(text)
+
+    assert state.skip_reason == expected_skip, case
+    assert state.addrs.ips == expected_ips, case
+    assert state.addrs.invalid == expected_invalid, case
+    assert state.usable is (expected_skip == ""), case
+
+
+def test_classify_rpc_state_explains_an_empty_file() -> None:
+    # The detail is what the log line and the alert description quote, so it has to
+    # name what was wrong rather than repeat "no addresses".
+    state = classify_rpc_state("not-an-ip\n")
+
+    assert "no usable address" in state.detail
+    assert "not-an-ip" in state.detail
+
+
+def test_classify_rpc_state_is_usable_unchanged_by_order() -> None:
+    # Same content in a different order is the same set (the file is re-written by
+    # the server push, and a reordered push must not look like a change).
+    one = classify_rpc_state("1.2.3.4\n5.6.7.8\n")
+    two = classify_rpc_state("5.6.7.8\n1.2.3.4\n")
+
+    assert one == two
 
 
 NODES_PAYLOAD = {

@@ -38,9 +38,10 @@ def test_empty_set_is_rejected(kind: str) -> None:
     assert (kind, REASON_EMPTY) in reasons(result)
 
 
-def test_empty_rpc_ip_keeps_the_round_close() -> None:
-    # home-ops#196: a missing/empty hath state file must not publish an empty set,
-    # and must not let the other kinds through either.
+def test_an_empty_rpc_set_is_still_a_refusal_when_it_was_derived() -> None:
+    # Deriving an empty address set is a refusal (never publish an empty RPC set).
+    # A source that has NOTHING to derive uses `skipped` instead — see below; the
+    # two are deliberately different outcomes (home-ops#196).
     result = evaluate(good_payloads(**{"rpc-ip": ()}), {}, RATIO)
 
     assert not result.ok
@@ -108,6 +109,47 @@ def test_a_missing_kind_is_rejected_as_upstream() -> None:
 
     assert not result.ok
     assert reasons(result) == {("tracker", REASON_UPSTREAM)}
+
+
+RPC_SKIPS = {"rpc-domain": "missing", "rpc-ip": "missing"}
+
+
+def test_a_skipped_kind_is_not_an_upstream_rejection() -> None:
+    # home-ops#196: the hath state file is missing, so those two kinds are skipped
+    # by decision — the round may publish the rest. This is the whole difference
+    # between "skip" and "refuse".
+    payloads = [p for p in good_payloads() if p.kind not in RPC_SKIPS]
+
+    result = evaluate(payloads, {}, RATIO, skipped=RPC_SKIPS)
+
+    assert result.ok
+    assert result.rejections == ()
+
+
+def test_only_the_named_kinds_are_skipped() -> None:
+    payloads = [p for p in good_payloads() if p.kind not in ("tracker", *RPC_SKIPS)]
+
+    result = evaluate(payloads, {}, RATIO, skipped=RPC_SKIPS)
+
+    assert not result.ok
+    assert reasons(result) == {("tracker", REASON_UPSTREAM)}
+
+
+def test_a_skipped_kind_is_not_judged_for_emptiness_or_shrink() -> None:
+    # Nothing was derived, so there is nothing to judge: an empty derived payload
+    # would be a refusal, an absent one that the source explained is not.
+    payloads = [p for p in good_payloads() if p.kind not in RPC_SKIPS]
+
+    result = evaluate(payloads, {"rpc-ip": 5, "rpc-domain": 1}, RATIO, skipped=RPC_SKIPS)
+
+    assert result.ok
+
+
+def test_skipping_everything_is_not_a_gate_decision() -> None:
+    # Belt and braces: an empty payload list with everything skipped passes the
+    # gate, and it is the caller's job to never send a publish from that (the app
+    # always derives src/tracker). Two independent rules, both tested.
+    assert evaluate([], {}, RATIO, skipped=dict.fromkeys(["src", "tracker", "rpc-domain", "rpc-ip"], "missing")).ok
 
 
 def test_one_rejection_blocks_every_kind() -> None:

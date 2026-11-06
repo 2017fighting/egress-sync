@@ -7,9 +7,9 @@ file.
 
 from __future__ import annotations
 
-from egress_sync.app import GATE_REJECTED, PUBLISH_ERROR, PUBLISHED, SOURCE_ERROR, EgressSync
+from egress_sync.app import GATE_REJECTED, PARTIAL, PUBLISH_ERROR, PUBLISHED, RPC_KINDS, SOURCE_ERROR, EgressSync
 from egress_sync.config import Config
-from egress_sync.derive import NodeIPs, RpcAddrs, TrackerHosts
+from egress_sync.derive import SKIP_EMPTY, SKIP_MISSING, NodeIPs, RpcAddrs, RpcState, TrackerHosts
 from egress_sync.metrics import Metrics
 
 from tests.conftest import (
@@ -27,7 +27,7 @@ def make_app(
     *,
     nodes: NodeIPs | Exception | None = None,
     trackers: TrackerHosts | Exception | None = None,
-    rpc: RpcAddrs | Exception | None = None,
+    rpc: RpcState | RpcAddrs | Exception | None = None,
     publisher: StubPublisher | None = None,
     refresher: StubRefresher | None = None,
 ) -> tuple[EgressSync, StubPublisher, StubRefresher]:
@@ -118,17 +118,59 @@ def test_unreachable_upstream_publishes_nothing(config: Config, metrics: Metrics
     assert "connection refused" in outcome.detail
 
 
-def test_missing_rpc_state_file_publishes_nothing(config: Config, metrics: Metrics) -> None:
-    from egress_sync.sources import SourceError
-
-    app, publisher, _ = make_app(config, metrics)
-    app._rpc = StubRpcSource(SourceError("hath RPC state file does not exist: /var/lib/hath/rpc-servers.txt"))
+def test_missing_rpc_state_file_skips_both_rpc_kinds_and_publishes_the_rest(config: Config, metrics: Metrics) -> None:
+    # home-ops#196: the state file is another app's output. Its absence must not
+    # stop the tracker/source sets from being refreshed, and must never publish an
+    # empty RPC set (the worker keeps the previous revision).
+    app, publisher, refresher = make_app(
+        config, metrics, rpc=RpcState(RpcAddrs((), ()), SKIP_MISSING, "hath RPC state file does not exist")
+    )
 
     outcome = app.run_round()
 
-    assert outcome.result == SOURCE_ERROR
-    assert publisher.published == []
-    assert "does not exist" in outcome.detail
+    assert outcome.result == PARTIAL
+    assert set(outcome.skipped) == set(RPC_KINDS)
+    assert [kind for kind, _ in publisher.published] == ["src", "tracker"]
+    assert refresher.calls == 1  # the sets that DID publish are refreshed
+    assert metrics.get("egress_sync_last_round_result", result=PARTIAL) == 1
+    assert metrics.get("egress_sync_last_round_result", result=PUBLISHED) == 0
+    for kind in RPC_KINDS:
+        assert metrics.get("egress_sync_skipped_total", kind=kind, reason=SKIP_MISSING) == 1
+        assert metrics.get("egress_sync_derived_entries", kind=kind) == 0
+        # Never published by this round: the previous version is what stays live.
+        assert metrics.get("egress_sync_entries", kind=kind) == 0
+    # The sets that did publish are a success by the "can still publish" measure.
+    assert metrics.get("egress_sync_last_success_timestamp_seconds") > 0
+    assert "missing" in outcome.detail
+
+
+def test_empty_rpc_state_file_is_a_skip_not_a_refusal(config: Config, metrics: Metrics) -> None:
+    app, publisher, _ = make_app(config, metrics, rpc=RpcState(RpcAddrs((), ()), SKIP_EMPTY, "holds no usable address"))
+
+    outcome = app.run_round()
+
+    assert outcome.result == PARTIAL
+    assert [kind for kind, _ in publisher.published] == ["src", "tracker"]
+    for kind in RPC_KINDS:
+        assert metrics.get("egress_sync_skipped_total", kind=kind, reason=SKIP_EMPTY) == 1
+        # The distinct reason is the whole point: "empty" and "missing" name
+        # different owners, so they must not collapse into one series.
+        assert metrics.get("egress_sync_skipped_total", kind=kind, reason=SKIP_MISSING) == 0
+
+
+def test_a_skipped_kind_keeps_its_shrink_baseline(config: Config, metrics: Metrics) -> None:
+    """A skipped round must not erase what the RPC set looked like when it last published."""
+    app, publisher, _ = make_app(config, metrics)
+    assert app.run_round().result == PUBLISHED
+    assert app._published_counts["rpc-ip"] == 2
+
+    app._rpc = StubRpcSource(RpcState(RpcAddrs((), ()), SKIP_MISSING))
+    publisher.published.clear()
+
+    assert app.run_round().result == PARTIAL
+    # Baseline intact: when the file comes back with fewer addresses than before,
+    # the shrink gate still has something to compare against.
+    assert app._published_counts == {"src": 2, "tracker": 2, "rpc-domain": 1, "rpc-ip": 2}
 
 
 def test_partial_publish_failure_is_recorded(config: Config, metrics: Metrics) -> None:
@@ -182,6 +224,19 @@ def test_dry_run_derives_and_gates_but_publishes_nothing(config: Config, metrics
     assert refresher.calls == 0
     assert metrics.get("egress_sync_derived_entries", kind="tracker") == 2
     assert metrics.get("egress_sync_entries", kind="tracker") == 0
+    assert metrics.get("egress_sync_last_success_timestamp_seconds") == 0
+
+
+def test_dry_run_reports_partial_when_a_source_was_skipped(config: Config, metrics: Metrics) -> None:
+    app, publisher, refresher = make_app(config, metrics, rpc=RpcState(RpcAddrs((), ()), SKIP_MISSING))
+
+    outcome = app.run_round(dry_run=True)
+
+    # A dry run must not look healthier than the real round it is predicting.
+    assert outcome.result == PARTIAL
+    assert publisher.published == []
+    assert refresher.calls == 0
+    assert set(outcome.skipped) == set(RPC_KINDS)
     assert metrics.get("egress_sync_last_success_timestamp_seconds") == 0
 
 

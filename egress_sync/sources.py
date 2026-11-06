@@ -12,7 +12,16 @@ import pathlib
 from collections.abc import Callable, Iterable, Mapping
 
 from . import CLIENT_NAME
-from .derive import NodeIPs, RpcAddrs, TrackerHosts, derive_node_ips, derive_tracker_hosts, parse_rpc_state
+from .derive import (
+    SKIP_UNREADABLE,
+    NodeIPs,
+    RpcAddrs,
+    RpcState,
+    TrackerHosts,
+    classify_rpc_state,
+    derive_node_ips,
+    derive_tracker_hosts,
+)
 from .transport import HttpError, Response, Transport
 
 
@@ -81,23 +90,33 @@ class QbtTrackerSource:
 class RpcStateSource:
     """The hath fork's state file: one normalised IPv4 per line.
 
-    Missing or unreadable is a `SourceError`, not an empty set: an empty set
-    would look like "the server pushed nothing", and the difference matters when
-    reading the failure afterwards.
+    Missing, unreadable and empty are NOT round failures (`home-ops#196`): the
+    file is written by a different app, so its absence carries no information
+    about the two sets that can still be derived. `fetch` therefore answers with
+    a `RpcState` — addresses, or the reason there are none — and the caller skips
+    the RPC kinds and publishes the rest. It never answers with an empty address
+    set, which is the difference between "skip" and "publish nothing": the
+    previous revision stays live either way.
+
+    Unreadable is kept apart from missing so the alert names the right owner: a
+    broken mount/permission needs a human now, a not-yet-written file is just
+    `home-ops#195` still in flight.
     """
 
     def __init__(self, path: str, read_text: Callable[[str], str] | None = None) -> None:
         self._path = path
         self._read_text = read_text or (lambda p: pathlib.Path(p).read_text(encoding="utf-8", errors="replace"))
 
-    def fetch(self) -> RpcAddrs:
+    def fetch(self) -> RpcState:
         try:
             text = self._read_text(self._path)
-        except FileNotFoundError as exc:
-            raise SourceError(f"hath RPC state file does not exist: {self._path}") from exc
+        except FileNotFoundError:
+            return classify_rpc_state(None)
         except OSError as exc:
-            raise SourceError(f"hath RPC state file is unreadable: {self._path}: {exc}") from exc
-        return parse_rpc_state(text)
+            return RpcState(
+                RpcAddrs((), ()), SKIP_UNREADABLE, f"hath RPC state file is unreadable: {self._path}: {exc}"
+            )
+        return classify_rpc_state(text)
 
 
 class Publisher:

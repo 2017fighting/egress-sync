@@ -34,11 +34,16 @@ SPECS: tuple[Spec, ...] = (
     Spec(
         "egress_sync_last_success_timestamp_seconds",
         "gauge",
-        "Unix time of the last fully published round; 0 if never.",
+        "Unix time of the last round whose publishes all succeeded (a skipped kind still counts; see egress_sync_skipped_total); 0 if never.",
     ),
     Spec("egress_sync_publish_failures_total", "counter", "Publish calls that did not return 2xx, by kind."),
     Spec("egress_sync_publish_rejected_total", "counter", "Rounds the gate refused to publish, by kind and reason."),
     Spec("egress_sync_refresh_failures_total", "counter", "Provider refreshes that failed."),
+    Spec(
+        "egress_sync_skipped_total",
+        "counter",
+        "Rounds a kind was skipped because its source held no usable content, by kind and reason.",
+    ),
     Spec("egress_sync_rounds_total", "counter", "Rounds completed, by result class."),
     Spec(
         "egress_sync_tracker_ip_literals",
@@ -51,7 +56,12 @@ SPEC_BY_NAME = {spec.name: spec for spec in SPECS}
 
 # The values `egress_sync_last_round_result` / `egress_sync_rounds_total` may
 # carry. Anything else is a bug, so it is checked at render time.
-RESULTS = ("published", "gate_rejected", "source_error", "publish_error")
+#
+# `partial` is "published, but one source had nothing to derive this round"
+# (home-ops#196: the hath state file missing/unreadable/empty). It is a separate
+# class from `published` so an alert can tell "all four sets refreshed" from "the
+# tracker set refreshed, the RPC pair is stale" without reading counters.
+RESULTS = ("published", "partial", "gate_rejected", "source_error", "publish_error")
 
 
 def _escape(value: str) -> str:
