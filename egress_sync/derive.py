@@ -176,6 +176,62 @@ def parse_rpc_state(text: str) -> RpcAddrs:
     return RpcAddrs(ips=_sorted_ips(ips), invalid=tuple(sorted(invalid)))
 
 
+# Why one read of the hath state file yielded no usable addresses. Both mean
+# the same thing to a round (skip the RPC kinds, publish the rest); they are
+# separate reasons because they name different owners (`home-ops#196`):
+#   missing    — the file is not there: the hath fork has not written it yet, or
+#                the volume is not mounted into this pod.
+#   unreadable — the file is there but this process cannot read it: mount broken,
+#                or a permission/ownership problem (uid 65532).
+#   empty      — the file exists and reads fine but carries nothing usable
+#                (empty, comments only, or only unparseable lines).
+SKIP_MISSING = "missing"
+SKIP_UNREADABLE = "unreadable"
+SKIP_EMPTY = "empty"
+
+
+@dataclass(frozen=True)
+class RpcState:
+    """One read of the hath state file: usable addresses, or why there are none."""
+
+    addrs: RpcAddrs
+    skip_reason: str = ""
+    # Human-facing sentence for the log/metric detail. Empty when usable.
+    detail: str = ""
+
+    @property
+    def usable(self) -> bool:
+        return not self.skip_reason
+
+
+def classify_rpc_state(text: str | None) -> RpcState:
+    """Decide what one state-file read means (`home-ops#196`).
+
+    `None` stands for "the file does not exist" so this stays a pure function a
+    table can drive (the reader passes None instead of raising).
+
+    Missing and empty are different answers on purpose. Neither fails the round:
+    the file is written by a different app, so its absence says nothing about the
+    two sets that can still be derived, and refusing the whole round would stop
+    the tracker set from being updated — a strictly worse outcome than a stale
+    RPC set plus an alert. What is never allowed is *publishing* an empty RPC
+    set: the caller skips the kind instead, and the previous revision stays live.
+
+    A file with some valid addresses and some garbage is still usable; the
+    garbage rides along in `addrs.invalid` and the gate turns it into a refusal,
+    so a corrupt line cannot be dropped in silence.
+    """
+    if text is None:
+        return RpcState(RpcAddrs((), ()), SKIP_MISSING, "hath RPC state file does not exist")
+    addrs = parse_rpc_state(text)
+    if addrs.ips:
+        return RpcState(addrs)
+    detail = "hath RPC state file holds no usable address"
+    if addrs.invalid:
+        detail += f" ({len(addrs.invalid)} unparseable line(s): {', '.join(addrs.invalid[:5])})"
+    return RpcState(addrs, SKIP_EMPTY, detail)
+
+
 def derive_node_ips(payload: bytes | str | Mapping[str, object]) -> NodeIPs:
     """`GET /api/v1/nodes` -> the nodes' InternalIPs.
 

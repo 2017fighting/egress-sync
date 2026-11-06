@@ -84,7 +84,7 @@ with the deploying repo (its HelmRelease is written from it).
 | `WORKER_URL` | **yes** | — | Base URL of the edge worker that stores the sets, e.g. `https://egress.example.workers.dev`. No trailing slash needed. |
 | `WORKER_TOKEN` | **yes** | — | Bearer token for `PUT /api/egress/<kind>`. Secret (SOPS). |
 | `QBT_URL` | **yes** | — | qBittorrent WebUI base, e.g. `http://qbittorrent.qbittorrent-private.svc:8082`. Must be reachable without credentials (pod CIDR in qbt's subnet whitelist, `home-ops#193`). |
-| `RPC_STATE_FILE` | **yes** | — | Path of the hath RPC state file, e.g. `/var/lib/hath/rpc-servers.txt`. Written by `2017fighting/hath-rust` (`home-ops#195`). Missing/unreadable blocks the round. |
+| `RPC_STATE_FILE` | **yes** | — | Path of the hath RPC state file, e.g. `/var/lib/hath/rpc-servers.txt`. Written by `2017fighting/hath-rust` (`home-ops#195`). The variable is required; the **file** is not — missing/unreadable/empty skips the two `rpc-*` kinds and lets the round publish the rest (`home-ops#196`, see "The publish gate"). |
 | `QBT_API_KEY` | no | *(empty)* | Optional bearer for qbt. Empty sends no `Authorization` header — the deployed qbt needs none. |
 | `KUBE_API_URL` | no | `https://kubernetes.default.svc` | Cluster API base for `/api/v1/nodes`. |
 | `KUBE_SA_TOKEN_FILE` | no | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Projected token; read each round, so rotation is free. |
@@ -117,13 +117,36 @@ A kind is refused when:
    the count of the last *fully published* round (in memory, so a restart has no
    baseline — one round of protection traded for no shared state).
 
-The `rpc-domain`/`rpc-ip` pair adds one case from `home-ops#196`: a missing or
-empty hath state file refuses the round rather than publishing an empty address
-set, so the previous version stays in place.
+The `rpc-domain`/`rpc-ip` pair has one deliberate exception (`home-ops#196`).
+The hath state file is written by a *different* app, so its absence carries no
+information about the two sets that can still be derived. When it is missing,
+unreadable, or holds no usable address:
 
-Upstream failures (qbt down, cluster API 403, state file gone) are also refusals,
-never a partial publish; they are classified `source_error` so the metric says
-which kind of bad day it was.
+* the two `rpc-*` kinds are **skipped** — never published empty, so the worker
+  keeps the previous revision and its shrink baseline stays intact;
+* `src` and `tracker` are published and the provider refresh still fires;
+* the round is classified `partial` (not `published`, not an error class), the
+  skip is counted in `egress_sync_skipped_total{kind,reason}` and logged once
+  with the reason, so an alert can name the owner:
+  `missing` (file not there — writer not deployed yet, or the volume is not
+  mounted here), `unreadable` (there, but this uid cannot read it — mount or
+  permission), `empty` (present, nothing usable in it — empty, comments only, or
+  only unparseable lines, which are also listed in the log).
+
+The two kinds are skipped **together**: they are one destination set (the H@H
+RPC channel), and publishing the domain with no address set beside it would be
+the "half a rule-set" state this gate exists to prevent. A file with *some*
+valid addresses and some garbage is still usable — the garbage is reported and
+turns into a refusal, so a corrupt line is never dropped in silence.
+
+Everything else stays all-or-nothing: an empty set that was actually *derived*,
+an unparseable token, a shrink below `MIN_ENTRY_RATIO`, or an unreachable
+upstream (qbt, the cluster API) still cancels the whole round.
+
+Upstream failures (qbt down, cluster API 403, unreadable ServiceAccount token)
+are refusals too, classified `source_error` so the metric says which kind of bad
+day it was. The one exception is the hath state file above: it is another app's
+output, so its absence is a `partial` round rather than a `source_error`.
 
 ## Metrics
 
@@ -133,15 +156,16 @@ restarted for it.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `egress_sync_last_success_timestamp_seconds` | gauge | — | Unix time of the last fully published round; `0` if never. Alert on `time() - this > 2 × INTERVAL_SECONDS`. |
+| `egress_sync_last_success_timestamp_seconds` | gauge | — | Unix time of the last round whose publishes all succeeded — a `partial` round counts (its skipped kinds are a separate signal); `0` if never. Alert on `time() - this > 2 × INTERVAL_SECONDS`. |
 | `egress_sync_last_round_timestamp_seconds` | gauge | — | When the last round (any result) finished. |
 | `egress_sync_entries` | gauge | `kind` | Entries in the last successfully published set. |
 | `egress_sync_derived_entries` | gauge | `kind` | Entries derived this round, published or not. |
 | `egress_sync_invalid_entries` | gauge | `kind` | Unparseable tokens this round. |
-| `egress_sync_last_round_result` | gauge | `result` | One-hot: `published`, `gate_rejected`, `source_error`, `publish_error`. |
+| `egress_sync_last_round_result` | gauge | `result` | One-hot: `published`, `partial`, `gate_rejected`, `source_error`, `publish_error`. |
 | `egress_sync_rounds_total` | counter | `result` | Rounds by classification. |
 | `egress_sync_publish_rejected_total` | counter | `kind`, `reason` | Gate refusals; `reason` ∈ `empty`, `invalid`, `shrink`, `upstream`. |
 | `egress_sync_publish_failures_total` | counter | `kind` | Publish calls that did not return 2xx. |
+| `egress_sync_skipped_total` | counter | `kind`, `reason` | Rounds a kind was skipped because its source had nothing usable; `reason` ∈ `missing`, `unreadable`, `empty`. |
 | `egress_sync_refresh_failures_total` | counter | — | Provider refreshes that failed (publish still counts as success). |
 | `egress_sync_last_refresh_success_timestamp_seconds` | gauge | — | Last successful provider refresh; `0` if never. |
 | `egress_sync_tracker_ip_literals` | gauge | — | Announce hosts that are bare IP literals. No publish kind carries those today (0 in current data); the gauge makes the gap visible instead of silent. |
@@ -153,14 +177,15 @@ restarted for it.
 # resident: one round immediately, then every INTERVAL_SECONDS
 python -m egress_sync
 
-# one round and exit — 0 published, 1 refused/failed, 2 configuration error
+# one round and exit — 0 fully published, 1 refused/failed/partial, 2 config error
 python -m egress_sync --once
 
 # derive and gate, print the counts, publish nothing (safe on a live cluster)
 python -m egress_sync --once --dry-run
 ```
 
-`--once` prints `{"result": ..., "detail": ..., "entries": {...}, "dry_run": ...}`
+`--once` prints `{"result": ..., "detail": ..., "entries": {...}, "skipped": {...},
+"dry_run": ...}`
 on stderr and exits accordingly, which is what makes it useful for a first
 rollout check: with `--dry-run` it verifies the three sources and the gate
 without touching the worker.
@@ -204,16 +229,20 @@ why the tests concentrate on tables in `tests/test_derive.py` and
 Python 3.11+; **no runtime dependencies** (pytest is test-only).
 
 ```bash
-python -m pytest          # 161 tests, ~0.1s, no network
+python -m pytest          # 183 tests, ~0.1s, no network
 ```
 
 ## Deploy prerequisites (rollout order matters)
 
 1. `home-ops#193` — qbt's runtime subnet whitelist admits the pod CIDR, otherwise
    every round is `source_error` with a 403.
-2. `home-ops#195` — the hath fork writes the state file. Without it, `rpc-ip`
-   derives empty and the gate refuses **every** round, including `src`/`tracker`;
-   mount the same volume and point `RPC_STATE_FILE` at it.
+2. `home-ops#195` — the hath fork writes the state file. Until it does, the
+   `rpc-*` kinds are skipped every round (rounds are `partial`, and
+   `egress_sync_skipped_total{reason="missing"}` climbs) while `src`/`tracker`
+   publish normally — that is `home-ops#196`'s deliberate degradation, not a
+   failure. Mount the same volume and point `RPC_STATE_FILE` at it. Point it at a
+   path that is **not** mounted and you get the same `missing` series: the metric
+   says "no file", and the mount is what to check first.
 3. `home-ops#192` — the worker's table, endpoint and rule-sets. Without the
    endpoint, every publish is a 4xx and the round is `publish_error`.
 4. The state file must be readable by uid 65532 (world-readable, or the pod's

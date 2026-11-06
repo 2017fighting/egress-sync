@@ -52,6 +52,26 @@ def test_one_hot_result_is_exclusive(metrics: Metrics) -> None:
     assert active == ["source_error"]
 
 
+def test_partial_is_a_first_class_round_result(metrics: Metrics) -> None:
+    # home-ops#196: "published, but a source had nothing to derive" must be its own
+    # one-hot member, or an alert cannot tell it from a full publish without
+    # reading counters.
+    assert "partial" in RESULTS
+    metrics.set_one_hot("egress_sync_last_round_result", "partial", RESULTS, "result")
+
+    active = [result for result in RESULTS if metrics.get("egress_sync_last_round_result", result=result) == 1]
+
+    assert active == ["partial"]
+
+
+def test_skipped_counter_carries_a_reason(metrics: Metrics) -> None:
+    metrics.inc("egress_sync_skipped_total", kind="rpc-ip", reason="empty")
+    metrics.inc("egress_sync_skipped_total", kind="rpc-ip", reason="empty")
+
+    assert metrics.get("egress_sync_skipped_total", kind="rpc-ip", reason="empty") == 2
+    assert metrics.get("egress_sync_skipped_total", kind="rpc-ip", reason="missing") == 0
+
+
 def test_undeclared_metric_is_an_error(metrics: Metrics) -> None:
     with pytest.raises(KeyError):
         metrics.set("egress_sync_something_invented", 1)
