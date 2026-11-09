@@ -59,8 +59,14 @@ class UrllibTransport:
         self._timeout = timeout
         self._context: ssl.SSLContext | None = None
         if ca_file:
+            # ADD to the system trust store, never replace it. `ca_file` is the
+            # Kubernetes API server's CA, which signs nothing else — building the
+            # context from it alone makes every other https call fail with
+            # "unable to get local issuer certificate" (found in production
+            # 2026-11-09: the worker is https, so no publish ever landed).
             try:
-                self._context = ssl.create_default_context(cafile=ca_file)
+                self._context = ssl.create_default_context()
+                self._context.load_verify_locations(cafile=ca_file)
             except OSError:
                 # The CA file only exists in-cluster; locally we fall back to the
                 # system store rather than refusing to start.
