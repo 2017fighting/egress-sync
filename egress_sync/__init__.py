@@ -15,7 +15,7 @@ SKIPS the two `rpc-*` kinds and publishes `src`/`tracker` as usual (home-ops#196
 An empty RPC set is never published: the worker keeps the previous revision.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 # Publish order is also the order the worker's rule-sets are fed, and it is
 # fixed here so a test can assert the contract without importing the app.
