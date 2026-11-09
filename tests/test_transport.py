@@ -8,6 +8,7 @@ v0.2.1 shipped and it cost a publish on every round: the worker is https.
 from __future__ import annotations
 
 import ssl
+from urllib.parse import quote
 
 from egress_sync import transport
 
@@ -49,3 +50,23 @@ def test_missing_ca_file_falls_back_to_the_system_store(monkeypatch, tmp_path):
         lambda **kwargs: (_ for _ in ()).throw(OSError("no such file")),
     )
     assert transport.UrllibTransport(timeout=1.0, ca_file=str(tmp_path / "absent.crt"))._context is None
+
+
+def test_provider_refresh_percent_encodes_non_ascii_names():
+    """Rule-provider names here are Chinese; urllib refuses a non-ASCII URL."""
+    from egress_sync.sources import ProviderRefresher
+
+    seen: list[str] = []
+
+    class _Transport:
+        def request(self, method, url, *, headers=None, body=None):
+            seen.append(url)
+            from egress_sync.transport import Response
+
+            return Response(status=200, body=b"{}")
+
+    refresher = ProviderRefresher(_Transport(), "http://router:9090", "s", ["直连来源"])
+    refresher.refresh()
+
+    assert seen == [f"http://router:9090/providers/rules/{quote('直连来源', safe='')}"], seen
+    assert "%E7%9B%B4" in seen[0]
