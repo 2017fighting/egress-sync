@@ -93,6 +93,7 @@ with the deploying repo (its HelmRelease is written from it).
 | `MIHOMO_CONTROLLER_URL` | no | *(empty)* | mihomo `external-controller` base, e.g. `http://192.168.9.1:9090`. Empty **disables** the refresh trigger (publishes still happen). |
 | `MIHOMO_SECRET` | no | *(empty)* | `external-controller` secret. Secret (SOPS). Empty sends no `Authorization` header. |
 | `MIHOMO_PROVIDERS` | no | *(empty)* | Comma-separated rule-provider names to refresh, e.g. `egress-src,egress-tracker,egress-rpc-domain,egress-rpc-ip`. Empty = discover them from the controller. |
+| `EXTRA_SOURCE_ENTRIES` | no | empty | Comma-separated extra source addresses added to the `src` kind. The one real member is the kube-vip control-plane VIP: it floats between nodes (so `GET /api/v1/nodes` never lists it), and libtorrent binds it as its source address on whichever node holds it. |
 | `INTERVAL_SECONDS` | no | `3600` | Ticker period. The residual gap is one interval: a tracker added just after a round is uncovered until the next. |
 | `LISTEN_ADDR` | no | `0.0.0.0:8080` | `/metrics` + `/healthz` bind address. Port is mandatory. |
 | `MIN_ENTRY_RATIO` | no | `0.6` | Shrink floor: a kind with fewer than `ratio × previous` entries is refused. Must be in `(0, 1]`. |
