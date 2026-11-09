@@ -185,7 +185,16 @@ class EgressSync:
                 "tracker IP literals present but not publishable as a rule: %s", ", ".join(trackers.ip_literals)
             )
         payloads = [
-            Payload("src", nodes.ips, nodes.invalid),
+            # `extra_source_entries` is the kube-vip VIP: it floats between nodes,
+            # so it never appears in `GET /api/v1/nodes`, and libtorrent binds it as
+            # its source address on whichever node currently holds it (observed:
+            # qBittorrent announcing from the VIP, which put those announces on the
+            # proxy path because the VIP was not in the source set).
+            Payload(
+                "src",
+                sorted(set(nodes.ips) | set(self.config.extra_source_entries)),
+                nodes.invalid,
+            ),
             Payload("tracker", trackers.domains, trackers.invalid),
         ]
         skipped: dict[str, str] = {}

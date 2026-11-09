@@ -99,3 +99,14 @@ def test_config_summary_redacts_secrets(base_env: dict[str, str]) -> None:
     assert summary["mihomo_secret"] == "***"
     assert summary["qbt_api_key"] == "***"
     assert "s3cret" not in str(summary)
+
+
+def test_extra_source_entries_are_parsed_and_optional(base_env: dict[str, str]) -> None:
+    """The VIP is configured, not derived: one line in the ConfigMap."""
+    from egress_sync.config import Config
+
+    assert Config.from_env(base_env).extra_source_entries == ()
+    assert (
+        Config.from_env({**base_env, "EXTRA_SOURCE_ENTRIES": "192.168.9.20, 10.0.0.9"}).extra_source_entries
+        == ("192.168.9.20", "10.0.0.9")
+    )

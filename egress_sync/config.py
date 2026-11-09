@@ -21,6 +21,7 @@ DEFAULTS = {
     "MIHOMO_CONTROLLER_URL": "",
     "MIHOMO_SECRET": "",
     "MIHOMO_PROVIDERS": "",
+    "EXTRA_SOURCE_ENTRIES": "",
     "INTERVAL_SECONDS": "3600",
     "LISTEN_ADDR": "0.0.0.0:8080",
     "MIN_ENTRY_RATIO": "0.6",
@@ -49,6 +50,7 @@ class Config:
     mihomo_controller_url: str
     mihomo_secret: str
     mihomo_providers: tuple[str, ...]
+    extra_source_entries: tuple[str, ...]
     interval_seconds: float
     listen_host: str
     listen_port: int
@@ -69,6 +71,7 @@ class Config:
             raise ConfigError("MIN_ENTRY_RATIO must be in (0, 1]")
 
         providers = tuple(p.strip() for p in _get(env, "MIHOMO_PROVIDERS").split(",") if p.strip())
+        extra_sources = tuple(p.strip() for p in _get(env, "EXTRA_SOURCE_ENTRIES").split(",") if p.strip())
 
         return cls(
             worker_url=_get(env, "WORKER_URL").rstrip("/"),
@@ -83,6 +86,7 @@ class Config:
             mihomo_controller_url=_get(env, "MIHOMO_CONTROLLER_URL").rstrip("/"),
             mihomo_secret=_get(env, "MIHOMO_SECRET").strip(),
             mihomo_providers=providers,
+            extra_source_entries=extra_sources,
             interval_seconds=_parse_float(env, "INTERVAL_SECONDS"),
             listen_host=host,
             listen_port=port,
