@@ -283,3 +283,23 @@ def test_entry_counts_are_reported_per_kind(config: Config, metrics: Metrics) ->
     assert outcome.entries == {"src": 2, "tracker": 2, "rpc-domain": 1, "rpc-ip": 2}
     assert metrics.get("egress_sync_entries", kind="src") == 2
     assert metrics.get("egress_sync_entries", kind="rpc-ip") == 2
+
+
+def test_the_vip_is_published_as_a_source_even_though_it_is_not_a_node(
+    config: Config, metrics: Metrics
+) -> None:
+    """kube-vip floats the control-plane VIP between nodes.
+
+    It never shows up in `GET /api/v1/nodes`, but libtorrent binds it as its
+    source address on whichever node holds it — observed in production: qbt
+    announcing from the VIP, which sent those announces down the proxy path
+    because the VIP was not in the source set.
+    """
+    from dataclasses import replace
+
+    app, publisher, _ = make_app(replace(config, extra_source_entries=("10.0.0.99",)), metrics)
+
+    outcome = app.run_round()
+
+    assert outcome.result == PUBLISHED
+    assert dict(publisher.published)["src"] == ("10.0.0.11", "10.0.0.12", "10.0.0.99")
