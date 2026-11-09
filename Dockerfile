@@ -9,6 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
+# TLS trust store: the worker is reached over https and python:alpine does not
+# ship ca-certificates, so without this every publish dies on
+# CERTIFICATE_VERIFY_FAILED (found in production 2026-11-09, v0.2.0).
+RUN apk add --no-cache ca-certificates
+
 # Non-root, fixed uid/gid: the pod needs read access to the hath state file
 # (world-readable, or the pod's fsGroup) and nothing else. No shell user, no home
 # directory, no write access anywhere.
