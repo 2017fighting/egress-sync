@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from urllib.parse import quote
 from collections.abc import Callable, Iterable, Mapping
 
 from . import CLIENT_NAME
@@ -169,7 +170,12 @@ class ProviderRefresher:
             _expect(
                 self._transport.request(
                     "PUT",
-                    f"{self._controller_url}/providers/rules/{name}",
+                    # Percent-encode: rule-provider names in this setup are
+                    # Chinese ("直连来源", "PT tracker 域名"), and urllib refuses
+                    # a non-ASCII URL outright ('ascii' codec ... ordinal not in
+                    # range(128)) — the refresh silently never happened until
+                    # 2026-11-09.
+                    f"{self._controller_url}/providers/rules/{quote(name, safe='')}",
                     headers=self._headers(),
                 ),
                 f"mihomo provider refresh {name}",
